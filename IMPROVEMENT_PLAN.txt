@@ -1,0 +1,252 @@
+EMOJI VENDOR CLASSIFICATION - IMPROVEMENT PLAN (from 0.914 towards 0.99)
+========================================================================
+
+Starting point: main-finetuning.ipynb
+  EfficientNetV2-B0 (ImageNet), 128 px, 5-fold stratified CV, average of the 5 fold models.
+  Cross-validation accuracy: 0.906 +/- 0.012 (folds: 0.911, 0.899, 0.902, 0.894, 0.924)
+  Kaggle test accuracy:      0.914 (the ensemble adds ~1% over a single fold model)
+
+This file first analyses where the remaining errors come from, then proposes changes
+ranked by expected gain, with the reasoning behind each. Expected gains are estimates,
+not measurements: each must be checked with an experiment.
+
+
+1. HONEST ASSESSMENT OF THE 0.99 GOAL
+-------------------------------------
+
+Going from 0.914 to 0.99 means cutting the error rate from 8.6% to 1%, i.e. removing
+about 9 out of every 10 remaining errors. That is a very large jump, and the analysis
+below suggests it is unlikely with a purely visual model:
+
+  - 73% of the errors fall into four vendor pairs (section 2). The two biggest,
+    Facebook <-> WhatsApp and Apple/Google -> Samsung, are exactly the pairs that the
+    original image size and PNG format separate almost perfectly (160 px = WhatsApp,
+    240 px = Facebook; 72 px palette PNG = Samsung, 72 px RGBA = Apple/Google).
+  - So if other teams reach 0.99, the most likely explanation is that their models use
+    the size/format shortcut, directly as features or indirectly by not resizing the
+    images (a 72 px emoji on a 240 px canvas visibly encodes its size).
+
+Realistic target for a purely visual model with everything below: roughly 0.94-0.96.
+Reaching 0.99 probably requires the metadata, which we decided not to use in the main
+model (the competition asks to classify "based solely on visual characteristics").
+Experiment M1 (section 6) measures this, which makes a strong point for the report
+whatever the outcome.
+
+
+2. ERROR ANALYSIS OF THE CURRENT MODEL
+--------------------------------------
+
+Out-of-fold confusion matrix (rows: true vendor, columns: predicted):
+
+               apple  facebook  google  messenger  mozilla  samsung  whatsapp   recall
+  apple         1773        23      36          1        1      147        26    0.883
+  facebook        14      1504       6         12        2       11       179    0.870
+  google          52         5    1772          2        2      119        10    0.903
+  messenger        0        18       0        577        3        0        13    0.944
+  mozilla          1        19       8         51      325        3         4    0.791
+  samsung         11         1       2          0        0     1840         5    0.990
+  whatsapp        19       120       1          4        2       33      1531    0.895
+  precision     0.95      0.89    0.97       0.89     0.97     0.85      0.87
+
+About 966 errors in total. Where they are:
+  - Facebook <-> WhatsApp:          299 errors (31%)
+  - Apple/Google -> Samsung:        266 errors (28%)
+  - Apple <-> Google:                88 errors  (9%)
+  - Mozilla -> Messenger:            51 errors  (5%)
+
+Observations:
+  a) Samsung is a "sink" class. Its recall is 99%, but its precision is only 85%: the
+     model predicts Samsung whenever it hesitates between 72 px vendors. The recall table
+     alone hides this, so always look at precision too.
+  b) Facebook (240 px source) and WhatsApp (160 px source) are both downsampled to
+     128 px, which throws away the fine details (outlines, gradients) that distinguish
+     them. Higher resolution should help this pair the most.
+  c) Apple, Google and Samsung all come from 72 px sources: upsampling them to 128 or 224
+     adds no detail, so resolution will not help this pair much. Better features (bigger
+     network, longer training) are the main levers there.
+  d) Mozilla -> Messenger: Mozilla is the rarest class (397 images), so the model sees few
+     examples of it.
+
+Strong overfitting: training accuracy reaches 99.9% while validation stays around 90-92%.
+The model memorizes the training images rather than learning vendor style in general.
+
+Near-duplicates (measured on the raw pixels): about 35% of the training images have a
+near-identical twin in the training set, and the twin has the same vendor 94-99% of the
+time. They are the same emoji in another skin tone or gender (e.g. the same person
+emoji in 5 skin tones). The test set has the same structure (3,429 test images with a
+near-twin in the training set). Two consequences:
+  - Random (stratified) folds are the right choice: they mirror the train/test
+    relationship. Grouping twins into the same fold would make CV pessimistic compared
+    with Kaggle.
+  - The hard cases are the opposite: the SAME emoji drawn by DIFFERENT vendors (e.g. an
+    eggplant by Apple vs Google). The model must learn style, not content.
+
+
+3. STEP 0 - FIX THE DATA (do first, ~10 minutes)
+------------------------------------------------
+
+[ ] 0.1 Remove the duplicate training files.
+        X_train has 10,288 images, but the dataset has 9,879: the Drive copy of data/train
+        contains 409 duplicate files named "xxxx (1).png" (created by re-uploading to
+        Drive). The notebook strips the " (1)" suffix, so these images are counted twice.
+        Consequences:
+          - A duplicate and its original can fall into different folds: the model is then
+            validated on an image it trained on, which inflates CV accuracy slightly
+            (rough estimate: up to ~0.3%).
+          - These 409 images weigh twice as much in training.
+        Fix: skip files whose name contains " (" when loading, or better, delete them from
+        Drive. Check that X_train has 9,879 images afterwards.
+
+[ ] 0.2 Check the test folder the same way (currently 9,879 images, which is correct).
+
+
+4. STEP 1 - BETTER DIAGNOSTICS / METRICS (~30 minutes, no retraining)
+---------------------------------------------------------------------
+
+Kaggle scores accuracy, so accuracy stays the number to maximize. But accuracy alone
+says nothing about WHY the model fails, and it is noisy: on one fold (2,000 images),
+1 image = 0.05%, and the folds differ by up to 3%. Add these to the evaluation section,
+computed on the out-of-fold predictions (which the notebook already has):
+
+[ ] 1.1 Precision per vendor (next to recall), plus macro-F1.
+        Reveals "sink" classes like Samsung (section 2a).
+
+[ ] 1.2 Top-2 accuracy: how often the true vendor is the model's 1st or 2nd choice.
+        If top-2 is much higher than top-1 (e.g. 98% vs 91%), the model "almost knows":
+        ensembling, TTA and better training will pay off. If top-2 is also low, the
+        model is missing information, which points to resolution or the metadata.
+
+[ ] 1.3 Log loss (cross-entropy) and calibration of the out-of-fold probabilities.
+        Needed to weight models in an ensemble, and less noisy than accuracy for
+        comparing two training runs.
+
+[ ] 1.4 A grid of misclassified images (true vs predicted vendor, with confidence).
+        Shows whether errors are the same emoji drawn by several vendors, blurry
+        upsampled images, mislabelled training data, etc. Very useful for the report.
+
+[ ] 1.5 Errors by source group (original size + PNG mode), for ANALYSIS ONLY.
+        Not used by the model. Checks the hypothesis of section 1: if most errors are
+        between vendors with different source sizes/formats, the metadata would fix them.
+
+[ ] 1.6 Accuracy on images with vs without a near-duplicate in the training set.
+        If the model already gets the near-duplicates right (likely), the remaining
+        errors are on "unique" emojis, and step 5.3 (nearest neighbour) won't help.
+
+How to compare experiments from now on:
+  - Use the SAME fold (fold 0) for quick experiments, and keep every other setting equal.
+  - A difference below ~1% on one fold is noise. Confirm promising changes on 2-3 folds,
+    or compare out-of-fold log loss, which is less noisy than accuracy.
+  - Kaggle allows 5 submissions per day: submit only full 5-fold runs that beat the
+    current CV score.
+
+
+5. PROPOSED CHANGES, BY EXPECTED GAIN
+-------------------------------------
+
+5.1 Higher resolution: 128 px -> 224 px                Expected: +1 to +3%   Cost: ~3x time
+    Why: the biggest error pair (Facebook <-> WhatsApp) comes from 240 px and 160 px
+    sources downsampled to 128 px. 224 px is also the resolution EfficientNetV2 was
+    pretrained at, so the pretrained features fit better.
+    Caveat: does little for Apple/Google/Samsung (72 px sources, see 2c).
+    How: IMG_SIZE = 224. Memory: X_train as uint8 at 224 px is ~1.5 GB, X_test the same;
+    fine on Colab, but don't convert them to float32. If GPU memory runs out, use
+    BATCH_SIZE = 32.
+    Test first on fold 0. If 224 is too slow on a free T4, try 192.
+
+5.2 Train longer, with a learning-rate warmup         Expected: +0.5 to +1%  Cost: more time
+    Why: fold 5 was still improving at its last epoch (92.36% at epoch 25/25): training
+    stopped because the cosine schedule ended, not because the model converged.
+    How: FINETUNE_EPOCHS = 40, and a short warmup (CosineDecay has warmup_steps and
+    warmup_target arguments) so the first fine-tuning steps don't disturb the pretrained
+    weights. Raise EarlyStopping patience to 8-10, since the cosine schedule's late
+    epochs often bring the best accuracy.
+
+5.3 A bigger / different pretrained network           Expected: +1 to +3%   Cost: 2-4x time
+    Candidates (all in tf.keras.applications):
+      - EfficientNetV2S (21M parameters, vs 6M for B0): same family, more capacity.
+      - ConvNeXtTiny (28M): a modern design that uses layer normalization instead of
+        batch normalization, so the train/eval mismatch we diagnosed cannot happen.
+        Its preprocessing is different: check include_preprocessing.
+    Why: Apple vs Google vs Samsung (72 px sources) can only be separated by better
+    features, not by more pixels.
+    Caveat: on a free T4, ConvNeXtTiny at 224 px with 5 folds may take several hours.
+    Combine with 5.1 only after measuring each separately on fold 0.
+
+5.4 Stronger regularization against overfitting       Expected: +0.5 to +2%  Cost: low
+    Why: 99.9% training vs ~91% validation accuracy.
+    Options, test one at a time:
+      - MixUp or CutMix: blend two training images and their labels. Strong regularizer,
+        widely used for fine-tuning. CutMix pastes a patch of one emoji onto another,
+        which forces the model to recognize style from parts of the image.
+      - Random erasing (blank out a random rectangle with white).
+      - Higher weight decay (AdamW weight_decay 0.01-0.05 instead of the default 0.004).
+      - Dropout 0.3 -> 0.5 before the last layer.
+    What NOT to do: color, brightness, contrast or hue changes. Exact colors and shading
+    are what identify a vendor (Apple's yellow is not Google's yellow): changing them
+    teaches the model to ignore its best clue. Same reasoning as removing the flip
+    (still to verify, see REPORT_TODO.txt experiment 3).
+
+5.5 Test-time augmentation (TTA)                       Expected: +0.3 to +1%  Cost: no training
+    Predict each test image several times with small shifts/zooms (the same kinds of
+    changes as during training) and average the probabilities. Also apply it to the
+    validation folds, so the CV score stays comparable with Kaggle.
+
+5.6 Ensemble of different models                       Expected: +1 to +2%   Cost: sum of models
+    The 5-fold average already gave ~+1%. Averaging DIFFERENT models (e.g.
+    EfficientNetV2-B0 at 224 px + ConvNeXtTiny + EfficientNetV2S) usually gains more,
+    because they make different mistakes. The saved test_probs_fold*.npy files make
+    this cheap: no need to retrain old models. Weight models by their out-of-fold log
+    loss (metric 1.3), or simply average.
+
+5.7 Pseudo-labelling (semi-supervised)                 Expected: +0.5 to +2%  Cost: one more full run
+    The test set is as large as the training set (9,879 images). Take the test images
+    the ensemble predicts with high confidence (e.g. > 0.95), add them to the training
+    set with their predicted vendor, and retrain.
+    Why it works: the test set contains near-twins of hard training images, and more
+    examples of each vendor's style help the rare classes (Mozilla).
+    Risks: confident mistakes get reinforced; keep the threshold high and check that the
+    CV score (on real labels only) improves. Check that the course rules allow using the
+    unlabelled test images; mention it in the report either way.
+
+5.8 Class weights for rare vendors                     Expected: ~0, maybe negative
+    Mozilla recall is only 79%. Class weights would raise it, but at the cost of more
+    errors on large vendors, and Kaggle scores overall accuracy. Low priority: test only
+    if the confusion matrix still shows Mozilla as a major problem after the rest.
+
+5.9 Retrain on 100% of the training data               Expected: ~+0.3%     Cost: one run
+    Each fold model sees 80% of the data. A final model trained on all of it, with the
+    number of epochs chosen by CV, gains a bit, but has no validation check. The 5-fold
+    ensemble is usually at least as good: low priority.
+
+
+6. METADATA EXPERIMENTS (report only, not the main model)
+---------------------------------------------------------
+
+[ ] M1  Image + metadata model: the current model with the original size and PNG mode
+        as extra inputs (concatenated to the pooled features before the last layer).
+        Compare with the image-only model. Prediction based on section 2: most of the
+        Facebook <-> WhatsApp and Apple/Google -> Samsung errors disappear, landing
+        around 0.97-0.99.
+        This would show that the remaining gap to 0.99 is a dataset shortcut, not a
+        modelling failure: a strong discussion point for the report.
+
+[ ] M2  Metadata-only classifier: from the training-set table, predicting the most
+        common vendor for each (size, mode) group gives about 67% accuracy, with no
+        image at all.
+
+
+7. RECOMMENDED ORDER
+--------------------
+
+  1. Step 0 (duplicates) and step 1 (diagnostics) - quick, and they change how every
+     later result is read.
+  2. Fold 0 experiments, one at a time: 224 px (5.1), then 40 epochs + warmup (5.2),
+     then a bigger network (5.3), then MixUp/CutMix (5.4).
+  3. Full 5-fold run of the best configuration + TTA (5.5). Submit.
+  4. Ensemble the best 2-3 different models (5.6). Submit.
+  5. If allowed by the course: pseudo-labelling (5.7). Submit.
+  6. Metadata experiments M1/M2 for the report, in parallel.
+
+Colab budget: a free T4 session lasts a few hours. Keep saving weights and test
+probabilities to Drive after each fold (already done), so a disconnection only loses the
+current fold.
