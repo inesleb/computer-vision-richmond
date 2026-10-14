@@ -88,7 +88,7 @@ near-twin in the training set). Two consequences:
 
 ## 3. Step 0 – Fix the data (do first, ~10 minutes)
 
-- [ ] **0.1 Remove the duplicate training files.**
+- [x] **0.1 Remove the duplicate training files.**
   `X_train` has 10,288 images, but the dataset has 9,879: the Drive copy of `data/train`
   contains 409 duplicate files named `xxxx (1).png` (created by re-uploading to
   Drive). The notebook strips the ` (1)` suffix, so these images are counted twice.
@@ -101,7 +101,7 @@ near-twin in the training set). Two consequences:
   Fix: skip files whose name contains ` (` when loading, or better, delete them from
   Drive. Check that `X_train` has 9,879 images afterwards.
 
-- [ ] **0.2 Check the test folder the same way** (currently 9,879 images, which is correct).
+- [x] **0.2 Check the test folder the same way** (currently 9,879 images, which is correct).
 
 
 ## 4. Step 1 – Better diagnostics / metrics (~30 minutes, no retraining)
@@ -111,16 +111,16 @@ says nothing about WHY the model fails, and it is noisy: on one fold (2,000 imag
 1 image = 0.05%, and the folds differ by up to 3%. Add these to the evaluation section,
 computed on the out-of-fold predictions (which the notebook already has):
 
-- [ ] **1.1 Precision per vendor** (next to recall), plus macro-F1.
+- [x] **1.1 Precision per vendor** (next to recall), plus macro-F1.
   Reveals "sink" classes like Samsung (section 2a).
-- [ ] **1.2 Top-2 accuracy:** how often the true vendor is the model's 1st or 2nd choice.
+- [x] **1.2 Top-2 accuracy:** how often the true vendor is the model's 1st or 2nd choice.
   If top-2 is much higher than top-1 (e.g. 98% vs 91%), the model "almost knows":
   ensembling, TTA and better training will pay off. If top-2 is also low, the
   model is missing information, which points to resolution or the metadata.
-- [ ] **1.3 Log loss** (cross-entropy) and calibration of the out-of-fold probabilities.
+- [x] **1.3 Log loss** (cross-entropy) and calibration of the out-of-fold probabilities.
   Needed to weight models in an ensemble, and less noisy than accuracy for
   comparing two training runs.
-- [ ] **1.4 A grid of misclassified images** (true vs predicted vendor, with confidence).
+- [x] **1.4 A grid of misclassified images** (true vs predicted vendor, with confidence).
   Shows whether errors are the same emoji drawn by several vendors, blurry
   upsampled images, mislabelled training data, etc. Very useful for the report.
 
@@ -137,6 +137,11 @@ How to compare experiments from now on:
 
 
 ## 5. Proposed changes, by expected gain
+
+> **Status (main.ipynb):** run A = 5.1 (224 px) + warmup + stochastic depth restored + fixed
+> schedule; run B = 5.3 (ConvNeXt-Tiny); 5.5 (TTA) and 5.6 (ensemble) measured on the
+> out-of-fold predictions. 5.2 "train longer" dropped: the 128 px model had already
+> converged (REPORT_TODO finding 2f). Reasoning for these choices: REPORT_TODO 2f–2k.
 
 | #   | Change                                  | Expected gain    | Cost              |
 |-----|-----------------------------------------|------------------|-------------------|
